@@ -31,9 +31,16 @@ import java.sql.SQLException;
 public class YugabyteDBDatabase extends PostgreSQLDatabase {
 
     public static final String LOCK_TABLE_NAME = "YB_FLYWAY_LOCK_TABLE";
+    /**
+     * This table is used to enforce locking through SELECT ... FOR UPDATE on a
+     * token row inserted in this table. The token row is inserted with the name
+     * of the Flyway's migration history table as a token for simplicity.
+     */
+    private static final String CREATE_LOCK_TABLE_DDL = "CREATE TABLE IF NOT EXISTS " + LOCK_TABLE_NAME + " (table_name varchar PRIMARY KEY, locked bool)";
+
     public YugabyteDBDatabase(Configuration configuration, JdbcConnectionFactory jdbcConnectionFactory, StatementInterceptor statementInterceptor) {
         super(configuration, jdbcConnectionFactory, statementInterceptor);
-        init();
+        createLockTable();
     }
 
     @Override
@@ -70,14 +77,23 @@ public class YugabyteDBDatabase extends PostgreSQLDatabase {
                 "CREATE INDEX IF NOT EXISTS \"" + table.getName() + "_s_idx\" ON " + table + " (\"success\");";
     }
 
+    /**
+     * YugabyteDB does not support PG Advisor Locks. So the YugabyteDB plugin
+     * employs SELECT ... FOR UPDATE in a transaction to implement locking for
+     * Flyway operations instead of the PG Advisory locks. If a single
+     * connection is used, it may cause issues if multiple threads execute
+     * begin/commit on it for Flyway operations. Returning false from this
+     * method ensures the same connection is not used for migrations.
+     * @return false
+     */
     @Override
     public boolean useSingleConnection() {
         return false;
     }
 
-    private void init() {
+    private void createLockTable() {
         try {
-            jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS " + LOCK_TABLE_NAME + " (table_name varchar PRIMARY KEY, locked bool, last_updated timestamp)");
+            jdbcTemplate.execute(CREATE_LOCK_TABLE_DDL);
         } catch (SQLException e) {
             throw new FlywaySqlException("Unable to initialize the lock table", e);
         }

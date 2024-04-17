@@ -2,7 +2,6 @@ package org.flywaydb.community.database.postgresql.yugabytedb;
 
 import lombok.CustomLog;
 import org.flywaydb.core.api.FlywayException;
-import org.flywaydb.core.api.configuration.Configuration;
 import org.flywaydb.core.internal.exception.FlywaySqlException;
 import org.flywaydb.core.internal.jdbc.JdbcTemplate;
 import org.flywaydb.core.internal.strategy.RetryStrategy;
@@ -15,14 +14,12 @@ import java.util.concurrent.Callable;
 @CustomLog
 public class YugabyteDBExecutionTemplate {
 
-    private final Configuration configuration;
     private final JdbcTemplate jdbcTemplate;
     private final String tableName;
     private final HashMap<String, Boolean> tableEntries = new HashMap<>();
 
 
-    YugabyteDBExecutionTemplate(Configuration configuration, JdbcTemplate jdbcTemplate, String tableName) {
-        this.configuration = configuration;
+    YugabyteDBExecutionTemplate(JdbcTemplate jdbcTemplate, String tableName) {
         this.jdbcTemplate = jdbcTemplate;
         this.tableName = tableName;
     }
@@ -51,7 +48,7 @@ public class YugabyteDBExecutionTemplate {
 
     }
 
-    private boolean tryLock() throws SQLException {
+    private boolean tryLock() {
         Exception exception = null;
         boolean txStarted = false, success = false;
         Statement statement = null;
@@ -62,27 +59,27 @@ public class YugabyteDBExecutionTemplate {
                 try {
                     statement.executeUpdate("INSERT INTO "
                             + YugabyteDBDatabase.LOCK_TABLE_NAME
-                            + " VALUES ('" + tableName + "', 'false', NOW())");
+                            + " VALUES ('" + tableName + "', 'false')");
                     tableEntries.put(tableName, true);
-                    LOG.info(Thread.currentThread().getName() + "> Inserted a record for " + tableName);
+                    LOG.info(Thread.currentThread().getName() + "> Inserted a token row for " + tableName + " in " + YugabyteDBDatabase.LOCK_TABLE_NAME);
                 } catch (SQLException e) {
                     if ("23505".equals(e.getSQLState())) {
                         // 23505 == UNIQUE_VIOLATION
-                        LOG.debug(Thread.currentThread().getName() + "> Table entry already added for " + tableName);
+                        LOG.debug(Thread.currentThread().getName() + "> Token row already added for " + tableName);
                     } else {
-                        throw new FlywaySqlException("Could not initialize lock for table " + YugabyteDBDatabase.LOCK_TABLE_NAME, e);
+                        throw new FlywaySqlException("Could not add token row for " + tableName + " in table " + YugabyteDBDatabase.LOCK_TABLE_NAME, e);
                     }
                 }
             }
 
             boolean locked;
-            String selectForUpdate = "SELECT locked, last_updated FROM "
+            String selectForUpdate = "SELECT locked FROM "
                     + YugabyteDBDatabase.LOCK_TABLE_NAME
                     + " WHERE table_name = '"
                     + tableName
                     + "' FOR UPDATE";
             String updateLocked = "UPDATE " + YugabyteDBDatabase.LOCK_TABLE_NAME
-                    + " SET locked = true, last_updated = NOW() WHERE table_name = '"
+                    + " SET locked = true WHERE table_name = '"
                     + tableName + "'";
 
             statement.execute("BEGIN");
@@ -90,7 +87,6 @@ public class YugabyteDBExecutionTemplate {
             ResultSet rs = statement.executeQuery(selectForUpdate);
             if (rs.next()) {
                 locked = rs.getBoolean("locked");
-                Timestamp ts = rs.getTimestamp("last_updated");
 
                 if (locked) {
                     statement.execute("COMMIT");
@@ -138,7 +134,7 @@ public class YugabyteDBExecutionTemplate {
             if (rs.next()) {
                 boolean locked = rs.getBoolean("locked");
                 if (locked) {
-                    statement.executeUpdate("UPDATE " + YugabyteDBDatabase.LOCK_TABLE_NAME + " SET locked = false, last_updated = NOW() WHERE table_name = '" + tableName + "'");
+                    statement.executeUpdate("UPDATE " + YugabyteDBDatabase.LOCK_TABLE_NAME + " SET locked = false WHERE table_name = '" + tableName + "'");
                 } else {
                     // Unexpected. This may happen only when callable took too long to complete
                     // and another thread forcefully reset it.
